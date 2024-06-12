@@ -105,6 +105,8 @@ extern "C"
 	};
 };
 
+#define RAY_GUDING_MAX_SAMPLES 64 // should same as hwrtl_gi.hlsl
+
 namespace hwrtl
 {
 namespace gi
@@ -154,6 +156,8 @@ namespace gi
         // gbuffer output
         std::shared_ptr<CTexture2D> m_hPosTexture;
         std::shared_ptr<CTexture2D> m_hNormalTexture;
+
+        //std::shared_ptr<CTexture2D> m_hRayGuidingLumaTexture;
 
         // ray tracing output + dilate ouput
         std::shared_ptr<CTexture2D> m_irradianceAndSampleCount;
@@ -205,8 +209,7 @@ namespace gi
         uint32_t m_nRtSceneLightCount;
         Vec2i m_nAtlasSize;
         uint32_t m_sampleIndex;
-        uint32_t m_maxRayGuidingSamples;
-        float m_rtGlobalCbPadding[59];
+        float m_rtGlobalCbPadding[60];
     };
     static_assert(sizeof(SRtGlobalConstantBuffer) == 256, "sizeof(SRtGlobalConstantBuffer) == 256");
 
@@ -237,6 +240,9 @@ namespace gi
 
         std::shared_ptr<CGraphicsPipelineState>m_pLightMapGBufferPSO;
         std::shared_ptr<CRayTracingPipelineState>m_pRayTracingPSO;
+
+        std::shared_ptr<CComputePipelineState>m_pRayGuidingPSO;
+
         std::shared_ptr<CGraphicsPipelineState>m_pDenoisePSO;
         std::shared_ptr<CGraphicsPipelineState>m_pDilatePSO;
         std::shared_ptr<CGraphicsPipelineState>m_pEncodeLightMapPSO;
@@ -306,6 +312,19 @@ namespace gi
             atlas.m_irradianceAndSampleCount = CGIBaker::GetDeviceCommand()->CreateTexture2D(resTexCreateDesc);
             atlas.m_shDirectionality = CGIBaker::GetDeviceCommand()->CreateTexture2D(resTexCreateDesc);
         }
+    }
+
+    static void PrePareBuildRayGuidingPSO()
+    {
+        std::size_t dirPos = WstringConverter().from_bytes(__FILE__).find(L"hwrtl_gi.cpp");
+        std::wstring shaderPath = WstringConverter().from_bytes(__FILE__).substr(0, dirPos) + L"hwrtl_gi.hlsl";
+
+        SShader csShader{ ERayShaderType::CS,L"FirstBounceRayGuidingCDFBuildCS" };
+
+        SShaderResources rayGuidingResources = { 0,3,0,0 };
+
+        SRComputePSOCreateDesc csPsoDesc = { shaderPath ,csShader ,rayGuidingResources };
+        pGiBaker->m_pRayGuidingPSO = CGIBaker::GetDeviceCommand()->CreateCSPipelineState(csPsoDesc);
     }
 
     static void PrePareGBufferPassPSO()
@@ -410,6 +429,7 @@ namespace gi
 	void hwrtl::gi::PrePareLightMapGBufferPass()
 	{
         PrePareGBufferPassPSO();
+        PrePareBuildRayGuidingPSO();
         PackMeshIntoAtlas();
         GenerateAtlas();
 
@@ -543,7 +563,7 @@ namespace gi
         SRtGlobalConstantBuffer rtGloablCB;
         rtGloablCB.m_nRtSceneLightCount = pGiBaker->m_aRayTracingLights.size();
         rtGloablCB.m_nAtlasSize = pGiBaker->m_nAtlasSize;
-        rtGloablCB.m_maxRayGuidingSamples = 128;
+
         pGiBaker->pRtSceneGlobalCB = CGIBaker::GetDeviceCommand()->CreateBuffer(&rtGloablCB, sizeof(SRtGlobalConstantBuffer), sizeof(SRtGlobalConstantBuffer), EBufferUsage::USAGE_CB);
 
         std::vector<SShader>rtShaders;
@@ -575,30 +595,37 @@ namespace gi
 
     void hwrtl::gi::ExecuteLightMapRayTracingPass()
     {
-        CGIBaker::GetRayTracingContext()->BeginRayTacingPasss();
-        CGIBaker::GetRayTracingContext()->SetRayTracingPipelineState(pGiBaker->m_pRayTracingPSO);
+
         
         for (uint32_t index = 0; index < pGiBaker->m_atlas.size(); index++)
         {
-            SAtlas& atlas = pGiBaker->m_atlas[index];
+            CGIBaker::GetRayTracingContext()->BeginRayTacingPasss();
+            CGIBaker::GetRayTracingContext()->SetRayTracingPipelineState(pGiBaker->m_pRayTracingPSO);
 
-            CGIBaker::GetRayTracingContext()->SetConstantBuffer(pGiBaker->pRtSceneGlobalCB,0);
-            CGIBaker::GetRayTracingContext()->SetShaderUAV(atlas.m_irradianceAndSampleCount, 0);
-            CGIBaker::GetRayTracingContext()->SetShaderUAV(atlas.m_shDirectionality, 1);
-            CGIBaker::GetRayTracingContext()->SetTLAS(pGiBaker->m_pTLAS,0);
-            CGIBaker::GetRayTracingContext()->SetShaderSRV(atlas.m_hPosTexture, 1);
-            CGIBaker::GetRayTracingContext()->SetShaderSRV(atlas.m_hNormalTexture, 2);
-            CGIBaker::GetRayTracingContext()->SetShaderSRV(pGiBaker->pRtSceneLight, 3);
-            CGIBaker::GetRayTracingContext()->SetShaderSRV(pGiBaker->m_instanceGpuData, 4);
-            for (uint32_t sampleIndex = 0; sampleIndex <= pGiBaker->m_bakeConfig.m_bakerSamples; sampleIndex++)
             {
-                SRtRenderPassInfo rtRpInfo;
-                rtRpInfo.m_rpIndex = sampleIndex;
-                CGIBaker::GetRayTracingContext()->SetRootConstants(0, sizeof(SRtRenderPassInfo) / sizeof(uint32_t), &rtRpInfo, 0);
-                CGIBaker::GetRayTracingContext()->DispatchRayTracicing(pGiBaker->m_nAtlasSize.x, pGiBaker->m_nAtlasSize.y);
+                SAtlas& atlas = pGiBaker->m_atlas[index];
+
+                CGIBaker::GetRayTracingContext()->SetConstantBuffer(pGiBaker->pRtSceneGlobalCB, 0);
+                CGIBaker::GetRayTracingContext()->SetShaderUAV(atlas.m_irradianceAndSampleCount, 0);
+                CGIBaker::GetRayTracingContext()->SetShaderUAV(atlas.m_shDirectionality, 1);
+                CGIBaker::GetRayTracingContext()->SetTLAS(pGiBaker->m_pTLAS, 0);
+                CGIBaker::GetRayTracingContext()->SetShaderSRV(atlas.m_hPosTexture, 1);
+                CGIBaker::GetRayTracingContext()->SetShaderSRV(atlas.m_hNormalTexture, 2);
+                CGIBaker::GetRayTracingContext()->SetShaderSRV(pGiBaker->pRtSceneLight, 3);
+                CGIBaker::GetRayTracingContext()->SetShaderSRV(pGiBaker->m_instanceGpuData, 4);
+                for (uint32_t sampleIndex = 0; sampleIndex <= std::min(pGiBaker->m_bakeConfig.m_bakerSamples, uint32_t(RAY_GUDING_MAX_SAMPLES)); sampleIndex++)
+                {
+                    SRtRenderPassInfo rtRpInfo;
+                    rtRpInfo.m_rpIndex = sampleIndex;
+                    CGIBaker::GetRayTracingContext()->SetRootConstants(0, sizeof(SRtRenderPassInfo) / sizeof(uint32_t), &rtRpInfo, 0);
+                    CGIBaker::GetRayTracingContext()->DispatchRayTracicing(pGiBaker->m_nAtlasSize.x, pGiBaker->m_nAtlasSize.y);
+                }
             }
+            
+
+
+            CGIBaker::GetRayTracingContext()->EndRayTacingPasss();
         }
-        CGIBaker::GetRayTracingContext()->EndRayTacingPasss();
     }
 
     struct SDenoiseAndDilateParams

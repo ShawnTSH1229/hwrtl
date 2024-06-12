@@ -321,6 +321,22 @@ namespace hwrtl
         }
     };
 
+    class CDxComputePipelineState : public CComputePipelineState
+    {
+    public:
+        ID3D12RootSignaturePtr m_pCsGlobalRootSig;
+        ID3D12PipelineStatePtr m_pCSPipelinState;
+
+        uint32_t m_slotDescNum[4];
+
+        CDxComputePipelineState()
+        {
+            m_pCsGlobalRootSig = nullptr;
+            m_pCSPipelinState = nullptr;
+            m_slotDescNum[0] = m_slotDescNum[1] = m_slotDescNum[2] = m_slotDescNum[3] = 0;
+        }
+    };
+
     class CDxRayTracingPipelineState : public CRayTracingPipelineState
     {
     public:
@@ -427,6 +443,7 @@ namespace hwrtl
         virtual void WaitGPUCmdListFinish()override;
         virtual void ResetCmdAlloc() override;
         virtual std::shared_ptr<CRayTracingPipelineState> CreateRTPipelineStateAndShaderTable(SRayTracingPSOCreateDesc& rtPsoDesc)override;
+        virtual std::shared_ptr<CComputePipelineState> CreateCSPipelineState(SRComputePSOCreateDesc& csPsoDesc)override;
         virtual std::shared_ptr<CGraphicsPipelineState>  CreateRSPipelineState(SRasterizationPSOCreateDesc& rsPsoDesc)override;
         virtual std::shared_ptr<CTexture2D> CreateTexture2D(STextureCreateDesc texCreateDesc) override;
         virtual std::shared_ptr<CBuffer> CreateBuffer(const void* pInitData, uint64_t nByteSize, uint64_t nStride, EBufferUsage bufferUsage) override;
@@ -436,6 +453,7 @@ namespace hwrtl
         virtual void* LockTextureForRead(std::shared_ptr<CTexture2D> readBackTexture)override;
         virtual void UnLockTexture(std::shared_ptr<CTexture2D> readBackTexture) override;
     };
+
 
     class CDx12RayTracingContext : public CRayTracingContext
     {
@@ -1800,6 +1818,60 @@ namespace hwrtl
         pDxRayTracingPipelineState->m_pShaderTable = CreateDefaultBuffer(shaderTableData.data(), shaderTableSize, pDXDevice->m_tempBuffers.AllocResource());
 
         return pDxRayTracingPipelineState;
+    }
+
+    std::shared_ptr<CComputePipelineState> hwrtl::CDxDeviceCommand::CreateCSPipelineState(SRComputePSOCreateDesc& csPsoDesc)
+    {
+        //https://github.com/microsoft/Xbox-ATG-Samples/blob/main/PCSamples/IntroGraphics/SimpleComputePC12/SimpleComputePC12.cpp
+
+        assert(csPsoDesc.computeResources.m_nCBV == 0); // todo:
+        assert(csPsoDesc.computeResources.m_nSRV == 0); // todo:
+        assert(csPsoDesc.computeResources.m_nSampler == 0); // todo:
+        assert(csPsoDesc.computeResources.m_rootConstant == 0); // todo:
+
+        const std::wstring filename = csPsoDesc.filename;
+
+        auto dxComputePipelineState = std::make_shared<CDxComputePipelineState>();
+        auto pDevice = pDXDevice->m_pDevice;
+
+        std::vector<D3D12_ROOT_PARAMETER1> rootParams;
+        std::vector<D3D12_DESCRIPTOR_RANGE1> descRanges;
+        rootParams.resize(1);
+        descRanges.resize(1);
+
+        D3D12_DESCRIPTOR_RANGE1 descRange;
+        descRange.BaseShaderRegister = 0;
+        descRange.NumDescriptors = csPsoDesc.computeResources.m_nUAV;
+        descRange.RegisterSpace = 0;
+        descRange.OffsetInDescriptorsFromTableStart = 0;
+        descRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        descRange.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+        descRanges[0] = descRange;
+
+        rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        rootParams[0].DescriptorTable.NumDescriptorRanges = 1;
+        rootParams[0].DescriptorTable.pDescriptorRanges = &descRanges[0];
+
+        D3D12_ROOT_SIGNATURE_DESC1 rootSigDesc = {};
+        rootSigDesc.NumParameters = rootParams.size();
+        rootSigDesc.pParameters = rootParams.data();
+
+        dxComputePipelineState->m_pCsGlobalRootSig = CreateRootSignature(pDevice, rootSigDesc);
+
+        ID3DBlobPtr csShader;
+        {
+            LPCWSTR pTarget = L"cs_6_1";
+            csShader = Dx12CompileRayTracingLibraryDXC(filename.c_str(), csPsoDesc.csShader.m_entryPoint.c_str(), pTarget, nullptr, 0);
+        }
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC descComputePSO = {};
+        descComputePSO.pRootSignature = dxComputePipelineState->m_pCsGlobalRootSig;
+        descComputePSO.CS.pShaderBytecode = csShader->GetBufferPointer();
+        descComputePSO.CS.BytecodeLength = csShader->GetBufferSize();
+
+        ThrowIfFailed(pDevice->CreateComputePipelineState(&descComputePSO, IID_PPV_ARGS(&dxComputePipelineState->m_pCSPipelinState)));
+        return dxComputePipelineState;
     }
 
     std::shared_ptr<CGraphicsPipelineState>  CDxDeviceCommand::CreateRSPipelineState(SRasterizationPSOCreateDesc& rsPsoDesc)

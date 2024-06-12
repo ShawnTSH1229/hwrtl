@@ -214,6 +214,8 @@ namespace hwrtl
 
 		RS_VS,	 // vertex shader
 		RS_PS,	 // pixel shader
+
+		CS,
 	};
 
 	enum class EVertexFormat
@@ -308,6 +310,13 @@ namespace hwrtl
 		virtual ~CGraphicsPipelineState() {}
 	};
 	
+	class CComputePipelineState
+	{
+	public:
+		CComputePipelineState() {}
+		virtual ~CComputePipelineState() {}
+	};
+
 	class CRayTracingPipelineState 
 	{
 	public:
@@ -389,6 +398,15 @@ namespace hwrtl
 		uint32_t defineNum;
 	};
 
+	struct SRComputePSOCreateDesc
+	{
+		std::wstring filename;
+		SShader csShader;
+		SShaderResources computeResources;
+		SShaderDefine* shaderDefines;
+		uint32_t defineNum;
+	};
+
 	struct SRasterizationPSOCreateDesc
 	{
 		std::wstring filename; 
@@ -408,6 +426,7 @@ namespace hwrtl
 		virtual void ResetCmdAlloc() = 0;
 
 		virtual std::shared_ptr<CRayTracingPipelineState> CreateRTPipelineStateAndShaderTable(SRayTracingPSOCreateDesc& rtPsoDesc) = 0;
+		virtual std::shared_ptr<CComputePipelineState> CreateCSPipelineState(SRComputePSOCreateDesc& csPsoDesc) = 0;
 		virtual std::shared_ptr<CGraphicsPipelineState>  CreateRSPipelineState(SRasterizationPSOCreateDesc& rsPsoDesc) = 0;
 
 		virtual std::shared_ptr<CTexture2D> CreateTexture2D(STextureCreateDesc texCreateDesc) = 0;
