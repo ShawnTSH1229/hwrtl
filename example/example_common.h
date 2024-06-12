@@ -1,0 +1,4 @@
+#pragma once
+#define ENABLE_LIGHTMAP_GI_EXAMPLE 1
+#define ENABLE_HLODTEX_EXAMPLE 0
+#define ENABLE_PVS_EXAMPLE 0
