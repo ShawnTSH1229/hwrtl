@@ -238,6 +238,8 @@ namespace hwrtl
 		FT_DepthStencil,
 		FT_RGBA8_UNORM, 
 		FT_RGBA32_FLOAT,
+		FT_R32_FLOAT,
+		FT_R32_UINT,
 	};
 
 	enum class ETexUsage
@@ -469,6 +471,20 @@ namespace hwrtl
 		virtual void DispatchRayTracicing(uint32_t width, uint32_t height) = 0;
 	};
 
+	class CComputeContext : public CContext
+	{
+	public:
+		CComputeContext() {}
+		virtual ~CComputeContext() {}
+
+		virtual void BeginRenderPasss() = 0;
+		virtual void EndRenderPasss() = 0;
+
+		virtual void SetComputePipelineState(std::shared_ptr<CComputePipelineState> csPipelineState) = 0;
+		virtual void SetShaderUAV(std::shared_ptr<CTexture2D>tex2D, uint32_t bindIndex) = 0;
+		virtual void Dispatch(uint32_t dispatchSizeX, uint32_t dispatchSizeY, uint32_t dispatchSizeZ) = 0;
+	};
+
 	class CGraphicsContext : public CContext
 	{
 	public:
@@ -503,6 +519,7 @@ namespace hwrtl
 
 	std::shared_ptr <CDeviceCommand> CreateDeviceCommand();
 	std::shared_ptr<CRayTracingContext> CreateRayTracingContext();
+	std::shared_ptr<CComputeContext> CreatComputeContext();
 	std::shared_ptr<CGraphicsContext> CreateGraphicsContext();
 
 	inline Vec3 NormalizeVec3(Vec3 vec)

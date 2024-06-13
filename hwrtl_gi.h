@@ -52,6 +52,7 @@ namespace gi
 		bool m_bDebugRayTracing = false; // see RT_DEBUG_OUTPUT in hwrtl_gi.hlsl
 		bool m_bAddVisualizePass = false;
 		bool m_bUseCustomDenoiser = false; // use custom denoiser or hwrtl default denoiser
+		bool m_bUseFirstBounceRayGuiding = true;
 	};
 
 	// must match the shading model id define in the hlsl shader

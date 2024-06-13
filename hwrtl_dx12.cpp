@@ -515,6 +515,39 @@ namespace hwrtl
         std::vector<uint32_t> m_rootConstantDatas[maxRootConstant];
     };
 
+    class CDxComputeContext : public CComputeContext
+    {
+    public:
+        CDxComputeContext();
+        virtual ~CDxComputeContext() {}
+
+        virtual void BeginRenderPasss()override;
+        virtual void EndRenderPasss()override;
+
+        virtual void SetComputePipelineState(std::shared_ptr<CComputePipelineState> csPipelineState) override;
+        virtual void SetShaderUAV(std::shared_ptr<CTexture2D>tex2D, uint32_t bindIndex) override;
+        virtual void Dispatch(uint32_t dispatchSizeX, uint32_t dispatchSizeY, uint32_t dispatchSizeZ)override;
+
+    private:
+        void ApplyPipelineState();
+        void ApplySlotViews(ESlotType slotType);
+        void ResetContext();
+
+        CDXPassDescManager m_csPassDescManager;
+
+        ID3D12RootSignaturePtr m_pCsGlobalRootSig;
+        ID3D12PipelineStatePtr m_pCSPipelinState;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE m_viewHandles[4][nHandlePerView];
+
+        uint32_t m_slotDescNum[4];
+        uint32_t m_viewSlotIndex[4];
+
+        bool m_bViewTableDirty[4];
+        bool m_bPipelineStateDirty;
+        bool m_bRenderTargetDirty;
+    };
+
     class CDxGraphicsContext : public CGraphicsContext
     {
     public:
@@ -584,6 +617,11 @@ namespace hwrtl
     std::shared_ptr<CRayTracingContext> hwrtl::CreateRayTracingContext()
     {
         return std::make_shared<CDx12RayTracingContext>();
+    }
+
+    std::shared_ptr<CComputeContext> hwrtl::CreatComputeContext()
+    {
+        return std::make_shared<CDxComputeContext>();
     }
 
     std::shared_ptr<CGraphicsContext> CreateGraphicsContext()
@@ -756,6 +794,12 @@ namespace hwrtl
             break;
         case ETexFormat::FT_RGBA32_FLOAT:
             return DXGI_FORMAT_R32G32B32A32_FLOAT;
+            break;
+        case ETexFormat::FT_R32_FLOAT:
+            return DXGI_FORMAT_R32_FLOAT;
+            break;
+        case ETexFormat::FT_R32_UINT:
+            return DXGI_FORMAT_R32_UINT;
             break;
         case ETexFormat::FT_DepthStencil:
             return DXGI_FORMAT_D24_UNORM_S8_UINT;
@@ -1859,10 +1903,16 @@ namespace hwrtl
 
         dxComputePipelineState->m_pCsGlobalRootSig = CreateRootSignature(pDevice, rootSigDesc);
 
+        std::vector<DxcDefine> buildInDefines;
+        buildInDefines.resize(1);
+
+        buildInDefines[0].Name = L"INCLUDE_RT_SHADER";
+        buildInDefines[0].Value = L"0";
+
         ID3DBlobPtr csShader;
         {
             LPCWSTR pTarget = L"cs_6_1";
-            csShader = Dx12CompileRayTracingLibraryDXC(filename.c_str(), csPsoDesc.csShader.m_entryPoint.c_str(), pTarget, nullptr, 0);
+            csShader = Dx12CompileRayTracingLibraryDXC(filename.c_str(), csPsoDesc.csShader.m_entryPoint.c_str(), pTarget, buildInDefines.data(), 1);
         }
 
         D3D12_COMPUTE_PIPELINE_STATE_DESC descComputePSO = {};
@@ -2781,6 +2831,119 @@ namespace hwrtl
         {
             m_bRootConstantsDirty[index] = false;
         }
+    }
+
+    /***************************************************************************
+    * CDxComputeContext
+    ***************************************************************************/
+    CDxComputeContext::CDxComputeContext()
+    {
+        ID3D12Device5Ptr pDevice = pDXDevice->m_pDevice;
+        m_csPassDescManager.Init(pDevice, true);
+        memset(m_viewHandles, 0, 4 * nHandlePerView * sizeof(D3D12_CPU_DESCRIPTOR_HANDLE));
+    }
+
+    void hwrtl::CDxComputeContext::BeginRenderPasss()
+    {
+        Dx12OpenCmdListInternal();
+
+        auto pCommandList = pDXDevice->m_pCmdList;
+        ID3D12DescriptorHeap* heaps[] = { m_csPassDescManager.GetHeapPtr() };
+        pCommandList->SetDescriptorHeaps(1, heaps); //todo: fix me
+
+        ResetContext();
+    }
+
+    void CDxComputeContext::EndRenderPasss()
+    {
+        Dx12CloseAndExecuteCmdListInternal();
+        Dx12WaitGPUCmdListFinishInternal();
+        Dx12ResetCmdAllocInternal();
+        m_csPassDescManager.ResetPassSlotStartIndex();
+    }
+
+    void CDxComputeContext::SetComputePipelineState(std::shared_ptr<CComputePipelineState>rtPipelineState)
+    {
+        CDxComputePipelineState* dxGraphicsPipelineState = static_cast<CDxComputePipelineState*>(rtPipelineState.get());
+        m_pCsGlobalRootSig = dxGraphicsPipelineState->m_pCsGlobalRootSig;
+        m_pCSPipelinState = dxGraphicsPipelineState->m_pCSPipelinState;
+        for (uint32_t index = 0; index < 4; index++)
+        {
+            m_slotDescNum[index] = dxGraphicsPipelineState->m_slotDescNum[index];
+        }
+
+        m_viewSlotIndex[0] = 0;
+        for (uint32_t index = 1; index < 4; index++)
+        {
+            m_viewSlotIndex[index] = m_viewSlotIndex[index - 1] + (m_slotDescNum[index - 1] > 0 ? 1 : 0);
+        }
+
+        m_bPipelineStateDirty = true;
+    }
+
+    void CDxComputeContext::SetShaderUAV(std::shared_ptr<CTexture2D>tex2D, uint32_t bindIndex)
+    {
+        CDxTexture2D* pDxTex2D = static_cast<CDxTexture2D*>(tex2D.get());
+        m_viewHandles[uint32_t(ESlotType::ST_U)][bindIndex] = pDxTex2D->m_uav.m_pCpuDescHandle;
+        m_bViewTableDirty[uint32_t(ESlotType::ST_U)] = true;
+
+        pDXDevice->dxBarrierManager.AddResourceBarrier(&pDxTex2D->m_dxResource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    void hwrtl::CDxComputeContext::Dispatch(uint32_t dispatchSizeX, uint32_t dispatchSizeY, uint32_t dispatchSizeZ)
+    {
+        auto pCommandList = pDXDevice->m_pCmdList;
+
+        ApplyPipelineState();
+
+        for (uint32_t index = 0; index < 4; index++)
+        {
+            ApplySlotViews(ESlotType(index));
+        }
+
+
+        pDXDevice->dxBarrierManager.FlushResourceBarrier(pCommandList);
+
+
+        pCommandList->Dispatch(dispatchSizeX, dispatchSizeY, dispatchSizeZ);
+    }
+
+    void hwrtl::CDxComputeContext::ApplyPipelineState()
+    {
+        if (m_bPipelineStateDirty)
+        {
+            auto pCommandList = pDXDevice->m_pCmdList;
+            pCommandList->SetPipelineState(m_pCSPipelinState);
+            pCommandList->SetComputeRootSignature(m_pCsGlobalRootSig);
+            m_bPipelineStateDirty = false;
+        }
+    }
+
+    void hwrtl::CDxComputeContext::ApplySlotViews(ESlotType slotType)
+    {
+        uint32_t slotIndex = uint32_t(slotType);
+        if (m_bViewTableDirty[slotIndex])
+        {
+            CheckBinding(m_viewHandles[slotIndex]);
+            auto pCommandList = pDXDevice->m_pCmdList;
+
+            uint32_t numCopy = m_slotDescNum[slotIndex];
+            uint32_t startIndex = m_csPassDescManager.GetAndAddCurrentPassSlotStart(numCopy);
+            D3D12_CPU_DESCRIPTOR_HANDLE destCPUHandle = m_csPassDescManager.GetCPUHandle(startIndex);
+            pDXDevice->m_pDevice->CopyDescriptors(1, &destCPUHandle, &numCopy, numCopy, m_viewHandles[slotIndex], nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+            D3D12_GPU_DESCRIPTOR_HANDLE gpuDescHandle = m_csPassDescManager.GetGPUHandle(startIndex);
+            pCommandList->SetComputeRootDescriptorTable(m_viewSlotIndex[slotIndex], gpuDescHandle);
+
+            m_bViewTableDirty[slotIndex] = false;
+        }
+    }
+
+    void hwrtl::CDxComputeContext::ResetContext()
+    {
+        m_bViewTableDirty[0] = m_bViewTableDirty[1] = m_bViewTableDirty[2] = m_bViewTableDirty[3] = false;
+        m_bPipelineStateDirty = false;
+        m_bRenderTargetDirty = false;
     }
 
     /***************************************************************************

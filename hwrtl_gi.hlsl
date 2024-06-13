@@ -144,7 +144,7 @@ SLightMapGBufferOutput LightMapGBufferGenPS(SGeometryVS2PS IN)
 #define RT_SHADER_NUM 2
 
 #ifndef USE_FIRST_BOUNCE_RAY_GUIDING
-#define USE_FIRST_BOUNCE_RAY_GUIDING 1
+#define USE_FIRST_BOUNCE_RAY_GUIDING 0
 #endif
 
 // first bounce ray guiding
@@ -203,10 +203,15 @@ Texture2D<float4> rtWorldNormal : register(t2);
 StructuredBuffer<SRayTracingLight> rtSceneLights : register(t3);
 StructuredBuffer<SMeshInstanceGpuData> rtSceneInstanceGpuData : register(t4);
 
+#if USE_FIRST_BOUNCE_RAY_GUIDING == 1
+Texture2D<float> rayGuidingCDFX : register(t5);
+Texture2D<float> rayGuidingCDFY : register(t6);
+#endif
+
 RWTexture2D<float4> irradianceAndValidSampleCount : register(u0);
 RWTexture2D<float4> shDirectionality : register(u1);
 
-#if USE_FIRST_BOUNCE_RAY_GUIDING
+#if USE_FIRST_BOUNCE_RAY_GUIDING == 1
 RWTexture2D<uint> rayGuidingLuminance : register(u2);
 #endif
 
@@ -482,6 +487,32 @@ float MISWeightRobust(float Pdf, float OtherPdf)
 	}
 }
 
+// Returns a point on the unit circle and a radius in z
+float3 ConcentricDiskSamplingHelper(float2 E)
+{
+	// Rescale input from [0,1) to (-1,1). This ensures the output radius is in [0,1)
+	float2 p = 2 * E - 0.99999994;
+	float2 a = abs(p);
+	float Lo = min(a.x, a.y);
+	float Hi = max(a.x, a.y);
+	float Epsilon = 5.42101086243e-20; // 2^-64 (this avoids 0/0 without changing the rest of the mapping)
+	float Phi = (PI / 4) * (Lo / (Hi + Epsilon) + 2 * float(a.y >= a.x));
+	float Radius = Hi;
+	// copy sign bits from p
+	const uint SignMask = 0x80000000;
+	float2 Disk = asfloat((asuint(float2(cos(Phi), sin(Phi))) & ~SignMask) | (asuint(p) & SignMask));
+	// return point on the circle as well as the radius
+	return float3(Disk, Radius);
+}
+
+float4 CosineSampleHemisphereConcentric(float2 E)
+{
+	float3 Result = ConcentricDiskSamplingHelper(E);
+	float SinTheta = Result.z;
+	float CosTheta = sqrt(1 - SinTheta * SinTheta);
+	return float4(Result.xy * SinTheta, CosTheta, CosTheta * (1.0 / PI));
+}
+
 /***************************************************************************
 *   LightMap Ray Tracing Pass:
 *       Light Sampling
@@ -609,7 +640,7 @@ SMaterialEval EvalMaterial(float3 outgoingDirection, SMaterialClosestHitPayload 
     return EvalLambertMaterial(outgoingDirection,payload);
 }
 
-#if USE_FIRST_BOUNCE_RAY_GUIDING
+#if USE_FIRST_BOUNCE_RAY_GUIDING == 1
 float2 InverseConcentricMapping(float2 p)
 {
 	// Handle degeneracy at the origin
@@ -647,18 +678,60 @@ float2 InverseConcentricMapping(float2 p)
 	return float2(x, y);
 }
 
-SMaterialEval EvalMaterial_RayGuiding(float3 outgoingDirection, SMaterialClosestHitPayload payload)
+SMaterialEval EvalMaterial_RayGuiding(float3 outgoingDirection, SMaterialClosestHitPayload payload, uint2 dispatch_thread_idx)
 {
     SMaterialEval materialEval = (SMaterialEval)0;
     float3 N_World = payload.m_worldNormal;
     float3 tangent_direction = WorldToTangent(outgoingDirection, N_World);
     float2 primarySample = InverseConcentricMapping(tangent_direction.xy);
     
-    int y = floor(primarySample.y * DIRECTIONAL_BINS_ONE_DIM);
+    float pdfAdjust = 1.0f;
 
+    if(rtRenderPassInfo.m_renderPassIndex >= RAY_GUDING_MAX_SAMPLES)
+    {
+        float lastRowPrefixSum = 0;
+        float rowPrefixSum;
+
+        int y = floor(primarySample.y * DIRECTIONAL_BINS_ONE_DIM);
+        {
+            int2 writePos = int2(y % 4, y / y);
+            int2 finalPos = dispatch_thread_idx * DIRECTIONAL_BINS_ONE_DIM / 4 + writePos;
+            rowPrefixSum = rayGuidingCDFY[finalPos];
+        }
+
+        if (y > 0)
+        {
+            int2 writePos = int2((y - 1) % 4, (y - 1) / 4);
+			int2 finalPos = dispatch_thread_idx * DIRECTIONAL_BINS_ONE_DIM / 4 + writePos;
+            lastRowPrefixSum = rayGuidingCDFY[finalPos];
+        }
+
+        pdfAdjust *= (rowPrefixSum - lastRowPrefixSum) * DIRECTIONAL_BINS_ONE_DIM;	
+
+        float lastPrefixSum = 0;
+		float prefixSum;
+        int x = floor(primarySample.x * DIRECTIONAL_BINS_ONE_DIM);
+		{
+			int2 finalPos = dispatch_thread_idx * DIRECTIONAL_BINS_ONE_DIM + int2(x, y);
+			prefixSum = rayGuidingCDFX[finalPos];
+		}
+
+        if (x > 0)
+		{
+			int2 finalPos = dispatch_thread_idx * DIRECTIONAL_BINS_ONE_DIM + int2(x - 1, y);
+			lastPrefixSum = rayGuidingCDFX[finalPos];
+		}
+
+        pdfAdjust *= (prefixSum - lastPrefixSum) * DIRECTIONAL_BINS_ONE_DIM;
+    }
 
     float NoL = saturate(dot(N_World, outgoingDirection));
-    float out_pdf = NoL / PI * PdfAdjust;
+    float out_pdf = NoL / PI * pdfAdjust;
+    float out_weight = (out_pdf > 0.0f) ? (1.0f / out_pdf) : 0;
+
+    materialEval.m_weight = out_weight;
+    materialEval.m_pdf =  out_pdf;
+    return materialEval;
 }
 #endif
 /***************************************************************************
@@ -690,6 +763,70 @@ SMaterialSample SampleMaterial(SMaterialClosestHitPayload payload, float4 random
     return SampleLambertMaterial(payload,randomSample);
 }
 
+#if USE_FIRST_BOUNCE_RAY_GUIDING == 1
+SMaterialSample SampleMaterial_RayGuiding(SMaterialClosestHitPayload payload, float4 randomSample, uint2 dispatch_thread_idx)
+{
+    float pdfAdjust = 1.0f; 
+    float2 samplePoint = randomSample.yx;
+
+    if(rtRenderPassInfo.m_renderPassIndex >= RAY_GUDING_MAX_SAMPLES)
+    {
+        float lastRowPrefixSum = 0;
+		float rowPrefixSum = 0;
+
+        int Y = 0;
+
+        [unroll]
+		for (int y = 0; y < DIRECTIONAL_BINS_ONE_DIM; y++)
+        {
+            int2 writePos = int2(y % 4, y / 4);
+			int2 finalPos = dispatch_thread_idx * DIRECTIONAL_BINS_ONE_DIM / 4 + writePos;
+
+            lastRowPrefixSum = rowPrefixSum;
+            rowPrefixSum = rayGuidingCDFY[finalPos];
+
+            if (rowPrefixSum > samplePoint.y)
+            {
+                samplePoint.y = float(y + (samplePoint.y - lastRowPrefixSum) / (rowPrefixSum - lastRowPrefixSum)) / DIRECTIONAL_BINS_ONE_DIM;
+                pdfAdjust *= (rowPrefixSum - lastRowPrefixSum) * DIRECTIONAL_BINS_ONE_DIM;
+                Y = y;
+				break;
+            }
+        }
+
+        float lastPrefixSum = 0;
+		float prefixSum = 0;
+
+        [unroll]
+		for (int x = 0; x < DIRECTIONAL_BINS_ONE_DIM; x++)
+        {
+            int2 finalPos = dispatch_thread_idx * DIRECTIONAL_BINS_ONE_DIM + int2(x, Y);
+            lastPrefixSum = prefixSum;
+            prefixSum = rayGuidingCDFX[finalPos];
+
+            if (prefixSum > samplePoint.x)
+			{
+				samplePoint.x = float(x + (samplePoint.x - lastPrefixSum) / (prefixSum - lastPrefixSum)) / DIRECTIONAL_BINS_ONE_DIM;									
+				pdfAdjust *= (prefixSum - lastPrefixSum) * DIRECTIONAL_BINS_ONE_DIM;
+				break;
+			}
+        }
+    }
+
+    float3 N_World = payload.m_worldNormal;
+    float4 sampledValue = CosineSampleHemisphereConcentric(samplePoint);
+    float3 outDirection = TangentToWorld(sampledValue.xyz, N_World);
+	
+	float outPdf = sampledValue.w * pdfAdjust;
+	float outWeight = (outPdf > 0.0f) ? (1.0f / outPdf) : 0;
+
+    SMaterialSample materialSample = (SMaterialSample)0;
+    materialSample.m_direction = outDirection;
+    materialSample.m_weight = outWeight;
+    materialSample.m_pdf = outPdf;
+    return materialSample;
+}
+#endif
 /***************************************************************************
 *   LightMap Ray Tracing Pass:
 *       Encode LightMap
@@ -815,6 +952,7 @@ void DoRayTracing(
 #if RT_DEBUG_OUTPUT
     inout float4 rtDebugOutput,
 #endif
+    uint2 dispatch_thread_idx,
     float3 worldPosition,
     float3 faceNormal,
     inout SRandomSequence randomSequence,
@@ -964,11 +1102,11 @@ void DoRayTracing(
 
                     if (any(lightSample.m_radianceOverPdf > 0))
                     {   
-                        SMaterialEval materialEval
-                        #if USE_FIRST_BOUNCE_RAY_GUIDING
-                        if((bounce == 0) && rtRenderPassInfo.m_renderPassIndex > RAY_GUDING_MAX_SAMPLES)
+                        SMaterialEval materialEval;
+                        #if USE_FIRST_BOUNCE_RAY_GUIDING == 1
+                        if(bounce == 0)
                         {
-
+                            materialEval = EvalMaterial_RayGuiding(lightSample.m_direction,rtRaylod,dispatch_thread_idx);
                         }
                         else
                         #endif
@@ -1001,7 +1139,19 @@ void DoRayTracing(
         // step2: Sample Material, Choose a [LIGHT DIRECTION] based on material randomly
         if(debugSample != 2)
         {
-            SMaterialSample materialSample = SampleMaterial(rtRaylod,randomSample);
+            SMaterialSample materialSample;
+            #if USE_FIRST_BOUNCE_RAY_GUIDING == 1
+            if(bounce == 0)
+            {
+                materialSample = SampleMaterial_RayGuiding(rtRaylod,randomSample,dispatch_thread_idx);
+            }
+            else
+            #else
+            {
+                materialSample  = SampleMaterial(rtRaylod,randomSample);
+            }
+            #endif
+            
             if(materialSample.m_pdf < 0.0 || asuint(materialSample.m_pdf) > 0x7F800000)
             {
                 break;
@@ -1125,6 +1275,8 @@ void LightMapRayTracingRayGen()
 #if RT_DEBUG_OUTPUT
         rtDebugOutput,
 #endif
+        rayIndex,
+
         worldPosition,
         worldFaceNormal,
         randomSequence,
@@ -1146,7 +1298,7 @@ void LightMapRayTracingRayGen()
 
     if (bIsValidSample)
     {
-        #if USE_FIRST_BOUNCE_RAY_GUIDING
+        #if USE_FIRST_BOUNCE_RAY_GUIDING == 1
         {
             int minRenderPassIndex = 0;
             int maxRenderPassIndex = RAY_GUDING_MAX_SAMPLES;
@@ -1159,7 +1311,7 @@ void LightMapRayTracingRayGen()
                 int2 final_position = (rayIndex.xy * DIRECTIONAL_BINS_ONE_DIM) + position_in_bin;
 
                 float illuminance = luminance_first_bounce_ray_guiding * saturate(dot(radianceDirection, worldFaceNormal));
-                InterlockedMax(rayGuidingLuminance[final_position], asuint(max(Illuminance, 0)));
+                InterlockedMax(rayGuidingLuminance[final_position], asuint(max(illuminance, 0)));
             }
         }
         #endif
@@ -1694,17 +1846,18 @@ SVisualizeGIResult VisualizeGIResultPS(SVisualizeGeometryVS2PS IN)
     return output;
 }
 
-RWTexture2D<uint> rayGuidingLuminanceBuildSrc;
-RWTexture2D<float> rayGuidingCDFXBuildDest;
-RWTexture2D<float> rayGuidingCDFYBuildDest;
+#if !INCLUDE_RT_SHADER
+RWTexture2D<uint> rayGuidingLuminanceBuildSrc : register(u0);
+RWTexture2D<float> rayGuidingCDFXBuildDest : register(u1);
+RWTexture2D<float> rayGuidingCDFYBuildDest : register(u2);
 
 groupshared float RowSum[DIRECTIONAL_BINS_ONE_DIM];
 
 [numthreads(16, 16, 1)]
 void FirstBounceRayGuidingCDFBuildCS(uint3 thread_idx : SV_GroupThreadID, uint3 grp_idx : SV_GroupID, uint3 dispatch_idx : SV_DispatchThreadID)
 {
-    int2 pixel_min_pos = int2((thread_idx.xy) / 16u) * 16u;;
-    int2 pixel_max_pos = (int2((thread_idx.xy) / 16u) + int2(1,1)) * 16u;;
+    int2 pixel_min_pos = int2(grp_idx.xy) * uint(DIRECTIONAL_BINS_ONE_DIM);;
+    int2 pixel_max_pos = (int2(grp_idx.xy) + int2(1,1)) * uint(DIRECTIONAL_BINS_ONE_DIM);;
     
     if (thread_idx.x < DIRECTIONAL_BINS_ONE_DIM)
     {
@@ -1714,7 +1867,7 @@ void FirstBounceRayGuidingCDFBuildCS(uint3 thread_idx : SV_GroupThreadID, uint3 
 		{
 			for(int dy = -filterKernelSize; dy <= filterKernelSize; dy++)
 			{
-                int2 final_pos = clamp(thread_idx.xy + int2(dx, dy), pixel_min_pos, pixel_max_pos);
+                int2 final_pos = clamp(grp_idx.xy *  DIRECTIONAL_BINS_ONE_DIM + thread_idx.xy + int2(dx, dy), pixel_min_pos, pixel_max_pos);
                 value += asfloat(rayGuidingLuminanceBuildSrc[final_pos]);
             }
         }
@@ -1739,7 +1892,8 @@ void FirstBounceRayGuidingCDFBuildCS(uint3 thread_idx : SV_GroupThreadID, uint3 
 		prefixSum /= WaveReadLaneAt(prefixSum, DIRECTIONAL_BINS_ONE_DIM - 1);
 		
 		int2 writePos = int2(thread_idx.x % 4, thread_idx.x / 4);
-        int2 final_pos = dispatch_idx.xy / uint2(4,4) + writePos;
+        int2 final_pos = grp_idx.xy * uint(4) + writePos;
 		rayGuidingCDFYBuildDest[final_pos] = prefixSum;
 	}
 }
+#endif
