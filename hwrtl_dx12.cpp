@@ -1878,6 +1878,11 @@ namespace hwrtl
         auto dxComputePipelineState = std::make_shared<CDxComputePipelineState>();
         auto pDevice = pDXDevice->m_pDevice;
 
+        for (uint32_t index = 0; index < 4; index++)
+        {
+            dxComputePipelineState->m_slotDescNum[index] = csPsoDesc.computeResources[index];
+        }
+
         std::vector<D3D12_ROOT_PARAMETER1> rootParams;
         std::vector<D3D12_DESCRIPTOR_RANGE1> descRanges;
         rootParams.resize(1);
@@ -2864,12 +2869,12 @@ namespace hwrtl
 
     void CDxComputeContext::SetComputePipelineState(std::shared_ptr<CComputePipelineState>rtPipelineState)
     {
-        CDxComputePipelineState* dxGraphicsPipelineState = static_cast<CDxComputePipelineState*>(rtPipelineState.get());
-        m_pCsGlobalRootSig = dxGraphicsPipelineState->m_pCsGlobalRootSig;
-        m_pCSPipelinState = dxGraphicsPipelineState->m_pCSPipelinState;
+        CDxComputePipelineState* dxComputePipelineState = static_cast<CDxComputePipelineState*>(rtPipelineState.get());
+        m_pCsGlobalRootSig = dxComputePipelineState->m_pCsGlobalRootSig;
+        m_pCSPipelinState = dxComputePipelineState->m_pCSPipelinState;
         for (uint32_t index = 0; index < 4; index++)
         {
-            m_slotDescNum[index] = dxGraphicsPipelineState->m_slotDescNum[index];
+            m_slotDescNum[index] = dxComputePipelineState->m_slotDescNum[index];
         }
 
         m_viewSlotIndex[0] = 0;
