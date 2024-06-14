@@ -105,7 +105,11 @@ extern "C"
 	};
 };
 
-#define RAY_GUDING_MAX_SAMPLES 64 // should same as hwrtl_gi.hlsl
+// should same as the macron defined in hwrtl_gi.hlsl
+#define RAY_GUDING_MAX_SAMPLES 128
+
+#define TEXEL_CLUSTER_SIZE 8
+#define DIRECTIONAL_BINS_ONE_DIM 16
 
 namespace hwrtl
 {
@@ -317,14 +321,14 @@ namespace gi
             atlas.m_hPosTexture = CGIBaker::GetDeviceCommand()->CreateTexture2D(texCreateDesc);
             atlas.m_hNormalTexture = CGIBaker::GetDeviceCommand()->CreateTexture2D(texCreateDesc);
 
-            STextureCreateDesc trayGuidingLumaCreateDesc{ ETexUsage::USAGE_SRV | ETexUsage::USAGE_UAV,ETexFormat::FT_R32_UINT,pGiBaker->m_nAtlasSize.x * 16 ,pGiBaker->m_nAtlasSize.y * 16 };
+            STextureCreateDesc trayGuidingLumaCreateDesc{ ETexUsage::USAGE_SRV | ETexUsage::USAGE_UAV,ETexFormat::FT_R32_UINT,(pGiBaker->m_nAtlasSize.x / TEXEL_CLUSTER_SIZE) * DIRECTIONAL_BINS_ONE_DIM ,(pGiBaker->m_nAtlasSize.y / TEXEL_CLUSTER_SIZE) * DIRECTIONAL_BINS_ONE_DIM };
             atlas.m_hRayGuidingLumaTexture = CGIBaker::GetDeviceCommand()->CreateTexture2D(trayGuidingLumaCreateDesc);
 
-            STextureCreateDesc rayGuidingCDFXDesc{ ETexUsage::USAGE_SRV | ETexUsage::USAGE_UAV,ETexFormat::FT_R32_FLOAT,pGiBaker->m_nAtlasSize.x * 16 ,pGiBaker->m_nAtlasSize.y * 16 };
+            STextureCreateDesc rayGuidingCDFXDesc{ ETexUsage::USAGE_SRV | ETexUsage::USAGE_UAV,ETexFormat::FT_R32_FLOAT,(pGiBaker->m_nAtlasSize.x / TEXEL_CLUSTER_SIZE) * DIRECTIONAL_BINS_ONE_DIM ,(pGiBaker->m_nAtlasSize.y / TEXEL_CLUSTER_SIZE) * DIRECTIONAL_BINS_ONE_DIM };
             atlas.m_hRayGuidingCDFXTexture = CGIBaker::GetDeviceCommand()->CreateTexture2D(rayGuidingCDFXDesc);
 
-            STextureCreateDesc rayGuidingCDFYDesc{ ETexUsage::USAGE_SRV | ETexUsage::USAGE_UAV,ETexFormat::FT_R32_FLOAT,pGiBaker->m_nAtlasSize.x * 4 ,pGiBaker->m_nAtlasSize.y * 4 };
-            atlas.m_hRayGuidingCDFYTexture = CGIBaker::GetDeviceCommand()->CreateTexture2D(rayGuidingCDFXDesc);
+            STextureCreateDesc rayGuidingCDFYDesc{ ETexUsage::USAGE_SRV | ETexUsage::USAGE_UAV,ETexFormat::FT_R32_FLOAT,(pGiBaker->m_nAtlasSize.x / TEXEL_CLUSTER_SIZE) * DIRECTIONAL_BINS_ONE_DIM / 4 ,(pGiBaker->m_nAtlasSize.y / TEXEL_CLUSTER_SIZE) * DIRECTIONAL_BINS_ONE_DIM / 4 };
+            atlas.m_hRayGuidingCDFYTexture = CGIBaker::GetDeviceCommand()->CreateTexture2D(rayGuidingCDFYDesc);
 
             STextureCreateDesc resTexCreateDesc = texCreateDesc;
             resTexCreateDesc.m_eTexUsage = ETexUsage::USAGE_SRV | ETexUsage::USAGE_UAV | ETexUsage::USAGE_RTV;
@@ -639,7 +643,7 @@ namespace gi
             CGIBaker::GetRayTracingContext()->SetShaderSRV(atlas.m_hRayGuidingCDFYTexture, 6);
         }
         
-        for (uint32_t sampleIndex = sampleOffset; sampleIndex <= (sampleNum + sampleOffset); sampleIndex++)
+        for (uint32_t sampleIndex = sampleOffset; sampleIndex < (sampleNum + sampleOffset); sampleIndex++)
         {
             SRtRenderPassInfo rtRpInfo;
             rtRpInfo.m_rpIndex = sampleIndex;
@@ -669,7 +673,7 @@ namespace gi
                     CGIBaker::GetComputeContext()->SetShaderUAV(atlas.m_hRayGuidingLumaTexture, 0);
                     CGIBaker::GetComputeContext()->SetShaderUAV(atlas.m_hRayGuidingCDFXTexture, 1);
                     CGIBaker::GetComputeContext()->SetShaderUAV(atlas.m_hRayGuidingCDFYTexture, 2);
-                    CGIBaker::GetComputeContext()->Dispatch(pGiBaker->m_nAtlasSize.x, pGiBaker->m_nAtlasSize.y, 1);
+                    CGIBaker::GetComputeContext()->Dispatch(pGiBaker->m_nAtlasSize.x / TEXEL_CLUSTER_SIZE, pGiBaker->m_nAtlasSize.y / TEXEL_CLUSTER_SIZE, 1);
                 }
                 CGIBaker::GetComputeContext()->EndRenderPasss();
 

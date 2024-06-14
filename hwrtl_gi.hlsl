@@ -64,6 +64,7 @@ SamplerState gSamPointWarp : register(s0, space1000);
 SamplerState gSamLinearWarp : register(s4, space1000);
 SamplerState gSamLinearClamp : register(s5, space1000);
 
+#define TEXEL_CLUSTER_SIZE 8
 #define DIRECTIONAL_BINS_ONE_DIM 16
 
 /***************************************************************************
@@ -149,7 +150,8 @@ SLightMapGBufferOutput LightMapGBufferGenPS(SGeometryVS2PS IN)
 
 // first bounce ray guiding
 
-#define RAY_GUDING_MAX_SAMPLES 64
+//todo:fix me
+#define RAY_GUDING_MAX_SAMPLES 10000
 
 static const uint maxBounces = 32;
 static const uint debugSample = 0;
@@ -684,53 +686,54 @@ SMaterialEval EvalMaterial_RayGuiding(float3 outgoingDirection, SMaterialClosest
     float3 N_World = payload.m_worldNormal;
     float3 tangent_direction = WorldToTangent(outgoingDirection, N_World);
     float2 primarySample = InverseConcentricMapping(tangent_direction.xy);
-    
-    float pdfAdjust = 1.0f;
+    float NoL = saturate(dot(N_World, outgoingDirection));
 
+    float pdfAdjust = 1.0f;
+    
     if(rtRenderPassInfo.m_renderPassIndex >= RAY_GUDING_MAX_SAMPLES)
     {
+        int y = floor(primarySample.y * DIRECTIONAL_BINS_ONE_DIM);
+
         float lastRowPrefixSum = 0;
         float rowPrefixSum;
-
-        int y = floor(primarySample.y * DIRECTIONAL_BINS_ONE_DIM);
         {
-            int2 writePos = int2(y % 4, y / y);
-            int2 finalPos = dispatch_thread_idx * DIRECTIONAL_BINS_ONE_DIM / 4 + writePos;
+            int2 writePos = int2(y % (DIRECTIONAL_BINS_ONE_DIM / 4), y / (DIRECTIONAL_BINS_ONE_DIM / 4));
+            int2 finalPos = (dispatch_thread_idx / TEXEL_CLUSTER_SIZE) * (DIRECTIONAL_BINS_ONE_DIM / 4) + writePos;
             rowPrefixSum = rayGuidingCDFY[finalPos];
         }
 
         if (y > 0)
         {
-            int2 writePos = int2((y - 1) % 4, (y - 1) / 4);
-			int2 finalPos = dispatch_thread_idx * DIRECTIONAL_BINS_ONE_DIM / 4 + writePos;
+            int2 writePos = int2((y - 1) % (DIRECTIONAL_BINS_ONE_DIM / 4), (y - 1) / (DIRECTIONAL_BINS_ONE_DIM / 4));
+			int2 finalPos = (dispatch_thread_idx / TEXEL_CLUSTER_SIZE) * (DIRECTIONAL_BINS_ONE_DIM / 4) + writePos;
             lastRowPrefixSum = rayGuidingCDFY[finalPos];
         }
 
-        pdfAdjust *= (rowPrefixSum - lastRowPrefixSum) * DIRECTIONAL_BINS_ONE_DIM;	
+        pdfAdjust *= ((rowPrefixSum - lastRowPrefixSum) * DIRECTIONAL_BINS_ONE_DIM);
 
         float lastPrefixSum = 0;
 		float prefixSum;
         int x = floor(primarySample.x * DIRECTIONAL_BINS_ONE_DIM);
 		{
-			int2 finalPos = dispatch_thread_idx * DIRECTIONAL_BINS_ONE_DIM + int2(x, y);
+			int2 finalPos = (dispatch_thread_idx / TEXEL_CLUSTER_SIZE) * DIRECTIONAL_BINS_ONE_DIM + int2(x, y);
 			prefixSum = rayGuidingCDFX[finalPos];
 		}
 
         if (x > 0)
 		{
-			int2 finalPos = dispatch_thread_idx * DIRECTIONAL_BINS_ONE_DIM + int2(x - 1, y);
+			int2 finalPos = (dispatch_thread_idx / TEXEL_CLUSTER_SIZE) * DIRECTIONAL_BINS_ONE_DIM + int2(x - 1, y);
 			lastPrefixSum = rayGuidingCDFX[finalPos];
 		}
 
-        pdfAdjust *= (prefixSum - lastPrefixSum) * DIRECTIONAL_BINS_ONE_DIM;
+        pdfAdjust *= ((prefixSum - lastPrefixSum) * DIRECTIONAL_BINS_ONE_DIM);
     }
 
-    float NoL = saturate(dot(N_World, outgoingDirection));
-    float out_pdf = NoL / PI * pdfAdjust;
+        
+    float out_pdf = ((NoL / PI) * pdfAdjust);
     float out_weight = (out_pdf > 0.0f) ? (1.0f / out_pdf) : 0;
-
-    materialEval.m_weight = out_weight;
+    materialEval.m_weight = payload.m_baseColor;
     materialEval.m_pdf =  out_pdf;
+
     return materialEval;
 }
 #endif
@@ -779,8 +782,8 @@ SMaterialSample SampleMaterial_RayGuiding(SMaterialClosestHitPayload payload, fl
         [unroll]
 		for (int y = 0; y < DIRECTIONAL_BINS_ONE_DIM; y++)
         {
-            int2 writePos = int2(y % 4, y / 4);
-			int2 finalPos = dispatch_thread_idx * DIRECTIONAL_BINS_ONE_DIM / 4 + writePos;
+            int2 writePos = int2(y % (DIRECTIONAL_BINS_ONE_DIM / 4), y / (DIRECTIONAL_BINS_ONE_DIM / 4));
+			int2 finalPos = (dispatch_thread_idx / TEXEL_CLUSTER_SIZE) * (DIRECTIONAL_BINS_ONE_DIM / 4) + writePos;
 
             lastRowPrefixSum = rowPrefixSum;
             rowPrefixSum = rayGuidingCDFY[finalPos];
@@ -788,7 +791,7 @@ SMaterialSample SampleMaterial_RayGuiding(SMaterialClosestHitPayload payload, fl
             if (rowPrefixSum > samplePoint.y)
             {
                 samplePoint.y = float(y + (samplePoint.y - lastRowPrefixSum) / (rowPrefixSum - lastRowPrefixSum)) / DIRECTIONAL_BINS_ONE_DIM;
-                pdfAdjust *= (rowPrefixSum - lastRowPrefixSum) * DIRECTIONAL_BINS_ONE_DIM;
+                pdfAdjust *= ((rowPrefixSum - lastRowPrefixSum) * DIRECTIONAL_BINS_ONE_DIM);
                 Y = y;
 				break;
             }
@@ -800,14 +803,14 @@ SMaterialSample SampleMaterial_RayGuiding(SMaterialClosestHitPayload payload, fl
         [unroll]
 		for (int x = 0; x < DIRECTIONAL_BINS_ONE_DIM; x++)
         {
-            int2 finalPos = dispatch_thread_idx * DIRECTIONAL_BINS_ONE_DIM + int2(x, Y);
+            int2 finalPos = (dispatch_thread_idx / TEXEL_CLUSTER_SIZE) * DIRECTIONAL_BINS_ONE_DIM + int2(x, Y);
             lastPrefixSum = prefixSum;
             prefixSum = rayGuidingCDFX[finalPos];
 
             if (prefixSum > samplePoint.x)
 			{
 				samplePoint.x = float(x + (samplePoint.x - lastPrefixSum) / (prefixSum - lastPrefixSum)) / DIRECTIONAL_BINS_ONE_DIM;									
-				pdfAdjust *= (prefixSum - lastPrefixSum) * DIRECTIONAL_BINS_ONE_DIM;
+				pdfAdjust *= ((prefixSum - lastPrefixSum) * DIRECTIONAL_BINS_ONE_DIM);
 				break;
 			}
         }
@@ -816,14 +819,13 @@ SMaterialSample SampleMaterial_RayGuiding(SMaterialClosestHitPayload payload, fl
     float3 N_World = payload.m_worldNormal;
     float4 sampledValue = CosineSampleHemisphereConcentric(samplePoint);
     float3 outDirection = TangentToWorld(sampledValue.xyz, N_World);
-	
-	float outPdf = sampledValue.w * pdfAdjust;
-	float outWeight = (outPdf > 0.0f) ? (1.0f / outPdf) : 0;
 
     SMaterialSample materialSample = (SMaterialSample)0;
+    float outPdf = (sampledValue.w * pdfAdjust);
     materialSample.m_direction = outDirection;
-    materialSample.m_weight = outWeight;
     materialSample.m_pdf = outPdf;
+    materialSample.m_weight = payload.m_baseColor;
+
     return materialSample;
 }
 #endif
@@ -1121,6 +1123,7 @@ void DoRayTracing(
                         if (bounce > 0)
                         {
                             radiance += lightContrib;
+                            luminance_first_bounce_ray_guiding += Luminance(lightContrib);
                         }
                         else
                         {
@@ -1136,21 +1139,22 @@ void DoRayTracing(
             }
         }
 
-        // step2: Sample Material, Choose a [LIGHT DIRECTION] based on material randomly
+        // step2: Sample Material, Choose a [LIGHT DIRECTION] based on the material randomly
         if(debugSample != 2)
         {
             SMaterialSample materialSample;
             #if USE_FIRST_BOUNCE_RAY_GUIDING == 1
+            // must exsist
             if(bounce == 0)
             {
                 materialSample = SampleMaterial_RayGuiding(rtRaylod,randomSample,dispatch_thread_idx);
             }
             else
-            #else
+            #endif
             {
                 materialSample  = SampleMaterial(rtRaylod,randomSample);
             }
-            #endif
+            
             
             if(materialSample.m_pdf < 0.0 || asuint(materialSample.m_pdf) > 0x7F800000)
             {
@@ -1226,14 +1230,12 @@ void DoRayTracing(
                         }
 
                         radiance += lightContribution;
+                        luminance_first_bounce_ray_guiding += Luminance(lightContribution);
                     }
                 }
-
-                luminance_first_bounce_ray_guiding += Luminance(lightContribution);
             }
         }
     }
-
 
     radianceValue = radiance;
 }
@@ -1255,7 +1257,13 @@ void LightMapRayTracingRayGen()
 
     SRandomSequence randomSequence;
     randomSequence.m_randomSeed = 0;
+
+    //#if USE_FIRST_BOUNCE_RAY_GUIDING
+    //randomSequence.m_nSampleIndex = StrongIntegerHash(rayIndex.y * m_nAtlasSize.x + rayIndex.x) + ((rtRenderPassInfo.m_renderPassIndex > RAY_GUDING_MAX_SAMPLES) ? (rtRenderPassInfo.m_renderPassIndex - RAY_GUDING_MAX_SAMPLES) : rtRenderPassInfo.m_renderPassIndex);
+    //#else
     randomSequence.m_nSampleIndex = StrongIntegerHash(rayIndex.y * m_nAtlasSize.x + rayIndex.x) + rtRenderPassInfo.m_renderPassIndex;
+    //#endif
+    
 
     float3 radianceValue = 0; // unused currently
     float3 radianceDirection = 0;
@@ -1303,12 +1311,12 @@ void LightMapRayTracingRayGen()
             int minRenderPassIndex = 0;
             int maxRenderPassIndex = RAY_GUDING_MAX_SAMPLES;
 
-            if(( rtRenderPassInfo.m_renderPassIndex >= minRenderPassIndex) && (rtRenderPassInfo.m_renderPassIndex <= maxRenderPassIndex))
+            if(( rtRenderPassInfo.m_renderPassIndex >= minRenderPassIndex) && (rtRenderPassInfo.m_renderPassIndex < maxRenderPassIndex))
             {
                 float2 Point = primaryRandSample.yx;
                 float2 jittered_bin = Point * DIRECTIONAL_BINS_ONE_DIM;
                 int2 position_in_bin = clamp(jittered_bin, float2(0, 0), float2(DIRECTIONAL_BINS_ONE_DIM - 1, DIRECTIONAL_BINS_ONE_DIM - 1));
-                int2 final_position = (rayIndex.xy * DIRECTIONAL_BINS_ONE_DIM) + position_in_bin;
+                int2 final_position = ((rayIndex.xy / TEXEL_CLUSTER_SIZE)* DIRECTIONAL_BINS_ONE_DIM) + position_in_bin;
 
                 float illuminance = luminance_first_bounce_ray_guiding * saturate(dot(radianceDirection, worldFaceNormal));
                 InterlockedMax(rayGuidingLuminance[final_position], asuint(max(illuminance, 0)));
@@ -1853,11 +1861,12 @@ RWTexture2D<float> rayGuidingCDFYBuildDest : register(u2);
 
 groupshared float RowSum[DIRECTIONAL_BINS_ONE_DIM];
 
-[numthreads(16, 16, 1)]
+// lane count == 32 on nvidia crad
+[numthreads(32, 16, 1)]
 void FirstBounceRayGuidingCDFBuildCS(uint3 thread_idx : SV_GroupThreadID, uint3 grp_idx : SV_GroupID, uint3 dispatch_idx : SV_DispatchThreadID)
 {
-    int2 pixel_min_pos = int2(grp_idx.xy) * uint(DIRECTIONAL_BINS_ONE_DIM);;
-    int2 pixel_max_pos = (int2(grp_idx.xy) + int2(1,1)) * uint(DIRECTIONAL_BINS_ONE_DIM);;
+    int2 pixel_min_pos = int2(grp_idx.xy) * int2(DIRECTIONAL_BINS_ONE_DIM,DIRECTIONAL_BINS_ONE_DIM);
+    int2 pixel_max_pos = (int2(grp_idx.xy) + int2(1,1)) * int2(DIRECTIONAL_BINS_ONE_DIM,DIRECTIONAL_BINS_ONE_DIM);
     
     if (thread_idx.x < DIRECTIONAL_BINS_ONE_DIM)
     {
@@ -1879,21 +1888,29 @@ void FirstBounceRayGuidingCDFBuildCS(uint3 thread_idx : SV_GroupThreadID, uint3 
 			RowSum[thread_idx.y] = prefixSum;
 		}
 
-        prefixSum /= WaveReadLaneAt(prefixSum, DIRECTIONAL_BINS_ONE_DIM - 1);
-        rayGuidingCDFXBuildDest[dispatch_idx.xy] = prefixSum;
+        float sum = WaveReadLaneAt(prefixSum, DIRECTIONAL_BINS_ONE_DIM - 1);
+        float result = (sum == 0.0f) ? 0.0 : (prefixSum / sum);
+
+        int2 write_pos = grp_idx.xy * DIRECTIONAL_BINS_ONE_DIM + thread_idx.xy;
+        rayGuidingCDFXBuildDest[write_pos] = result;
     }
 
     GroupMemoryBarrierWithGroupSync();
 
     if (thread_idx.y == 0)
 	{
-		float value = RowSum[thread_idx.x];
-		float prefixSum = WavePrefixSum(value) + value;
-		prefixSum /= WaveReadLaneAt(prefixSum, DIRECTIONAL_BINS_ONE_DIM - 1);
-		
-		int2 writePos = int2(thread_idx.x % 4, thread_idx.x / 4);
-        int2 final_pos = grp_idx.xy * uint(4) + writePos;
-		rayGuidingCDFYBuildDest[final_pos] = prefixSum;
+        if (thread_idx.x < DIRECTIONAL_BINS_ONE_DIM)
+        {
+		    float value = RowSum[thread_idx.x];
+		    float prefixSum = WavePrefixSum(value) + value;
+            float sum = WaveReadLaneAt(prefixSum, DIRECTIONAL_BINS_ONE_DIM - 1);
+
+		    int2 writePos = int2(thread_idx.x % (DIRECTIONAL_BINS_ONE_DIM / 4), thread_idx.x / (DIRECTIONAL_BINS_ONE_DIM/ 4 ));
+            int2 final_pos = grp_idx.xy * uint2(DIRECTIONAL_BINS_ONE_DIM / 4,DIRECTIONAL_BINS_ONE_DIM / 4) + writePos;
+
+            float result = (sum == 0.0f) ? 0.0 : (prefixSum / sum);
+		    rayGuidingCDFYBuildDest[final_pos] = result;
+        }
 	}
 }
 #endif

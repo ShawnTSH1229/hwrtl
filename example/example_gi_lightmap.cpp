@@ -406,7 +406,7 @@ int main()
         bakeConfig.m_bDebugRayTracing = false;
         bakeConfig.m_bAddVisualizePass = true;
         bakeConfig.m_bakerSamples = 512;
-        bakeConfig.m_bUseFirstBounceRayGuiding = false;
+        bakeConfig.m_bUseFirstBounceRayGuiding = true;
 
         float intensity = 1.0;
         Vec3 lightIntensity(intensity, intensity, intensity);
