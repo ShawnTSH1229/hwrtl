@@ -22,44 +22,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ***************************************************************************/
 
-
-// TODO:
-//      1. path tracing light grid
-//      2. first bounce ray guiding
-//      3. SelectiveLightmapOutputCS
-//      4. ReduceSHRinging
-//      5. https://www.ppsloan.org/publications/StupidSH36.pdf
-//      6. SH Div Sample Count
-//
-//      7. How to encode light map? AHD or Color Luma Directionality?    
-//      8. SHBasisFunction yzx?
-//      9. we nned to add the shading normal gbuffer? No?
-//      10. merge light map?
-//
-//      11. Light Map GBuffer Generation: https://ndotl.wordpress.com/2018/08/29/baking-artifact-free-lightmaps/
-//      12. shadow ray bias optimization
-//
-//      13. should we add luma to light map?
-//      14. light add and scale factor : use 10 1 for now,we should add a post process pass to get the max negetive value
-//      15. SHBasisFunction in unreal sh projection factor is 0.28 -0.48 0.48 -0.48? 
-//      
-//      16. Russian roulette: Unreal's Two Tweak or godot optimization :// <https://computergraphics.stackexchange.com/questions/2316/is-russian-roulette-really-the-answer>
-//      17. MISWeightRobust
-//      18. physical light unit
-//
-//      19. // "Precision Improvements for Ray / Sphere Intersection" - Ray Tracing Gems (2019) // https://link.springer.com/content/pdf/10.1007%2F978-1-4842-4427-2_7.pdf
-//      
-//      20. surpport mask material for foliage
-//      21. add blend seams pass
-
-//#ifndef INCLUDE_RT_SHADER
-//#define INCLUDE_RT_SHADER 1
-//#endif
-//
-//#ifdef RT_DEBUG_OUTPUT
-//#define RT_DEBUG_OUTPUT 0
-//#endif
-
 SamplerState gSamPointWarp : register(s0, space1000);
 SamplerState gSamLinearWarp : register(s4, space1000);
 SamplerState gSamLinearClamp : register(s5, space1000);
@@ -563,9 +525,6 @@ void SelectLight(float vRandom, int nLights, inout float aLightPickingCdf[RT_MAX
 #endif
 }
 
-//TODO:
-//1. Unform Sample Direction?
-//2. ? Because the light is normalized by the solid angle, the radiance/pdf ratio is just the color
 SLightSample SampleDirectionalLight(int nLightIndex, float2 randomSample, float3 worldPos, float3 worldNormal)
 {
     SLightSample lightSample = (SLightSample)0;
@@ -576,9 +535,6 @@ SLightSample SampleDirectionalLight(int nLightIndex, float2 randomSample, float3
     return lightSample;
 }
 
-// TODO:
-// 1. See pbrt-v4 sample sphere light
-// 2. find a better way of handling the region inside the light than just clamping to 1.0 here
 SLightSample SampleSphereLight(int nLightIndex, float2 randomSample, float3 worldPos, float3 worldNormal)
 {
     float3 lightDirection = rtSceneLights[nLightIndex].m_worldPosition - worldPos;
@@ -834,7 +790,6 @@ SMaterialSample SampleMaterial_RayGuiding(SMaterialClosestHitPayload payload, fl
 *       Encode LightMap
 ***************************************************************************/
 
-//TODO: ReduceSHRinging https://zhuanlan.zhihu.com/p/144910975
 //https://upload-images.jianshu.io/upload_images/26934647-52d3e477a26bb1aa.png?imageMogr2/auto-orient/strip|imageView2/2/w/750/format/webp
 float4 SHBasisFunction(float3 inputVector)
 {
@@ -1063,7 +1018,7 @@ void DoRayTracing(
             aLightPickingCdf[index] = vLightPickingCdfPreSum;
         }
 
-        // step1: Sample Light, Choose a [LIGHT] randomly
+        // step1: Sample Light, Select a [LIGHT] randomly
         if(debugSample != 1)
         {
             if (vLightPickingCdfPreSum > 0)
@@ -1144,7 +1099,6 @@ void DoRayTracing(
         {
             SMaterialSample materialSample;
             #if USE_FIRST_BOUNCE_RAY_GUIDING == 1
-            // must exsist
             if(bounce == 0)
             {
                 materialSample = SampleMaterial_RayGuiding(rtRaylod,randomSample,dispatch_thread_idx);
@@ -1767,6 +1721,7 @@ SEncodeOutputs EncodeLightMapPS(SEncodeGeometryVS2PS IN )
         float4 encodedSH = lightMap1.yzwx;
         float3 irradiance = lightMap0.xyz / sampleCount;
 
+        //todo: fixme
         const half logBlackPoint = 0.01858136;
         output.irradianceAndLuma = float4(sqrt(max(irradiance, float3(0.00001, 0.00001, 0.00001))), log2( 1 + logBlackPoint ) - (encodedSH.w / 255 - 0.5 / 255));
         output.shDirectionalityAndLuma = encodedSH;
