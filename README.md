@@ -16,3 +16,7 @@ GI baking result:
 <p align="left">
     <img src="/doc/result.png" width="60%" height="60%">
 </p>
+
+### Usage
+
+just copy and include "hwrtl_dx12.cpp", "hwrtl.h", "hwrtl_gi.cpp", "hwrtl_gi.h", "hwrtl_gi.hlsl" to your project.
