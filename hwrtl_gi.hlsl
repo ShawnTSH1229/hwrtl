@@ -1502,7 +1502,7 @@ float4 DenoiseLightMap(Texture2D<float4> inputTexture,float2 texUV)
 			for (int searchX = -HALF_SEARCH_WINDOW; searchX <= HALF_SEARCH_WINDOW; searchX++) 
             {
                 float2 searchUV = texUV + float2(searchX,searchY) * denoiseParamsBuffer.inputTexSizeAndInvSize.zw;
-                // TODO: point or linear sampler?
+                
                 float3 searchRGB = inputTexture.SampleLevel(gSamPointWarp, searchUV, 0.0).xyz;
                 float3 searchNormal = denoiseInputNormalTexture.SampleLevel(gSamPointWarp, searchUV, 0.0).xyz;
 
