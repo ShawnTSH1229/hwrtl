@@ -8,7 +8,7 @@ Hardware ray tracing library for GI Baker, HLOD Generation, PVS and Visibility T
 
 just copy and include "hwrtl_dx12.cpp", "hwrtl.h", "hwrtl_gi.cpp", "hwrtl_gi.h", "hwrtl_gi.hlsl" to your project.
 
-### Introduction
+### Implementation
 
 Firstly, we pack the lightmaps of each mesh into a number of atlases and search for the best lightmap layout with the **smallest** total size. The packing algorithm uses a third-party library: **stb_pack**. Then, generate the **lightmap gbuffer** by GPU and start light map path tracing. For each texels in the light map gbuffer, we trace 512 rays from the world position recorded in the gbuffer and each tracing bounces 32 times. For each bounce, we perform a light sampling and material sampling and combine them by **multi-importance sampling** to reduce variance.
 
