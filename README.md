@@ -6,7 +6,7 @@ Hardware ray tracing library for GI Baker, HLOD Generation, PVS and Visibility T
 
 ### Usage
 
-just copy and include "hwrtl_dx12.cpp", "hwrtl.h", "hwrtl_gi.cpp", "hwrtl_gi.h", "hwrtl_gi.hlsl" to your project.
+copy and include "hwrtl_dx12.cpp", "hwrtl.h", "hwrtl_gi.cpp", "hwrtl_gi.h", "hwrtl_gi.hlsl" to your project.
 
 ### Implementation
 
